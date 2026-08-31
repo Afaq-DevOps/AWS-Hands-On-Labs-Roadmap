@@ -1,253 +1,472 @@
-# Lab 15 — Configure an Application Load Balancer for EC2
+#  Lab 015 — Configure an Application Load Balancer for EC2
 
-> **Objective:** Deploy an internet-facing Application Load Balancer across two Availability Zones and distribute HTTP traffic between two EC2 web servers.
+> **MetaPi PSEB Training Program | AWS Hands-On Labs Roadmap**
 
 ---
 
-## 🏗️ Lab Architecture
+## 📌 Overview
+
+In this lab, you will deploy an **Application Load Balancer (ALB)** across two Availability Zones and use it to distribute HTTP traffic between two EC2 web servers.
+
+The lab builds on the **Multi-AZ VPC architecture created in Lab 014**.
+
+By completing this lab, you will understand how a load balancer receives requests from users, checks the health of backend servers, and forwards traffic only to healthy targets.
+
+---
+
+## 🎯 Learning Objectives
+
+By completing this hands-on lab, you will learn how to:
+
+* Create an Application Load Balancer Security Group.
+* Create a Web Server Security Group.
+* Understand Security Group to Security Group communication.
+* Launch EC2 web servers in two Availability Zones.
+* Configure Apache automatically using EC2 User Data.
+* Create an EC2 Target Group.
+* Register EC2 instances as targets.
+* Configure ALB listeners.
+* Configure ALB health checks.
+* Verify target health.
+* Test traffic through the ALB DNS name.
+* Simulate a backend server failure.
+* Understand how an ALB routes traffic when one target becomes unhealthy.
+* Understand basic high availability using multiple Availability Zones.
+
+---
+
+# 🏗️ Architecture
 
 ```text
-                              🌐 Internet
-                                   │
-                                   │ HTTP :80
-                                   ▼
-                      ┌─────────────────────────┐
-                      │ Application Load        │
-                      │ Balancer                │
-                      │ MetaPi-Lab15-ALB        │
-                      └────────────┬────────────┘
-                                   │
-                                   ▼
-                      ┌─────────────────────────┐
-                      │ Target Group            │
-                      │ MetaPi-Lab15-TG         │
-                      └────────────┬────────────┘
-                                   │
-                    ┌──────────────┴──────────────┐
-                    │                             │
-                    ▼                             ▼
-          ┌──────────────────┐         ┌──────────────────┐
-          │ Web Server A     │         │ Web Server B     │
-          │ eu-north-1a      │         │ eu-north-1b      │
-          │ Public-A         │         │ Public-B         │
-          │ 🟢 Healthy       │         │ 🟢 Healthy       │
-          └──────────────────┘         └──────────────────┘
+                           🌐 Internet
+                                |
+                                | HTTP :80
+                                v
+                    ┌─────────────────────────┐
+                    │  Application Load      │
+                    │  Balancer              │
+                    │  MetaPi-Lab15-ALB      │
+                    └────────────┬────────────┘
+                                 |
+                         HTTP :80 |
+                                 v
+                    ┌─────────────────────────┐
+                    │      Target Group       │
+                    │   MetaPi-Lab15-TG       │
+                    └────────────┬────────────┘
+                                 |
+                  ┌──────────────┴──────────────┐
+                  |                             |
+                  v                             v
+        ┌──────────────────┐          ┌──────────────────┐
+        │   Web Server A   │          │   Web Server B   │
+        │   AZ: eu-north-1a│          │   AZ: eu-north-1b│
+        │   Public-A       │          │   Public-B       │
+        │   Apache :80     │          │   Apache :80     │
+        │   🟢 Healthy     │          │   🟢 Healthy     │
+        └──────────────────┘          └──────────────────┘
 ```
 
-### AWS Region
+### Request Flow
 
 ```text
-eu-north-1 — Europe (Stockholm)
+Client
+  ↓
+ALB :80
+  ↓
+Target Group
+  ↓
+Healthy EC2 Target
+  ↓
+Apache Web Server
+  ↓
+HTTP Response
 ```
 
-### VPC
+---
+
+# 🌍 Lab Environment
+
+| Component           | Configuration                     |
+| ------------------- | --------------------------------- |
+| AWS Region          | `eu-north-1` — Europe (Stockholm) |
+| VPC                 | `MetaPi-MultiAZ-VPC`              |
+| VPC CIDR            | `10.20.0.0/16`                    |
+| Public Subnet A     | `MetaPi-Public-A`                 |
+| Public Subnet B     | `MetaPi-Public-B`                 |
+| Availability Zone A | `eu-north-1a`                     |
+| Availability Zone B | `eu-north-1b`                     |
+| Load Balancer       | `MetaPi-Lab15-ALB`                |
+| Target Group        | `MetaPi-Lab15-TG`                 |
+| Web Server A        | `MetaPi-Lab15-Web-A`              |
+| Web Server B        | `MetaPi-Lab15-Web-B`              |
+
+> **Note:** Availability Zone names can map differently between AWS accounts. Always select the two Availability Zones associated with the subnets you created in your Multi-AZ VPC.
+
+---
+
+# 📋 Prerequisites
+
+Before starting this lab, make sure you have completed **Lab 014 — Build a Multi-AZ VPC Architecture**.
+
+You should already have:
+
+* An AWS account.
+* Access to the AWS Management Console.
+* `MetaPi-MultiAZ-VPC`.
+* `MetaPi-Public-A`.
+* `MetaPi-Public-B`.
+* Internet Gateway configured for the public subnets.
+* Public route table configured.
+* An EC2 key pair.
+* Your current public IP address.
+
+---
+
+# 🔐 Security Design
+
+This lab uses two Security Groups.
+
+```text
+Internet
+   |
+   | HTTP :80
+   v
+ALB Security Group
+MetaPi-Lab15-ALB-SG
+   |
+   | HTTP :80
+   v
+Web Server Security Group
+MetaPi-Lab15-Web-SG
+   |
+   +---- Web Server A
+   |
+   +---- Web Server B
+```
+
+The important security concept is:
+
+> **The EC2 web servers accept HTTP traffic from the ALB Security Group instead of allowing HTTP directly from the entire internet.**
+
+SSH access is allowed only from your own IP address.
+
+---
+
+# 🛠️ Step 1 — Verify the Multi-AZ VPC
+
+Before creating the ALB, verify that your VPC from Lab 014 is available.
+
+### Navigate to:
+
+**AWS Console → VPC → Your VPCs**
+
+Find:
 
 ```text
 MetaPi-MultiAZ-VPC
-10.20.0.0/16
 ```
 
----
-
-# 🎯 Lab Objectives
-
-By completing this lab, you will:
-
-- Create Security Groups for the ALB and EC2 web servers.
-    
-- Deploy two EC2 web servers in different Availability Zones.
-    
-- Create an EC2 Target Group.
-    
-- Configure an Application Load Balancer.
-    
-- Configure an HTTP listener on port `80`.
-    
-- Configure ALB health checks.
-    
-- Verify both EC2 instances become healthy.
-    
-- Test traffic through the ALB DNS name.
-    
-- Simulate an instance failure and observe ALB failover.
-    
-
----
-
-# 📋 Resources Used
-
-|Resource|Name / Configuration|
-|---|---|
-|VPC|`MetaPi-MultiAZ-VPC`|
-|Public Subnet A|`MetaPi-Public-A`|
-|Public Subnet B|`MetaPi-Public-B`|
-|Availability Zone A|`eu-north-1a`|
-|Availability Zone B|`eu-north-1b`|
-|ALB Security Group|`MetaPi-Lab15-ALB-SG`|
-|Web Security Group|`MetaPi-Lab15-Web-SG`|
-|Target Group|`MetaPi-Lab15-TG`|
-|Load Balancer|`MetaPi-Lab15-ALB`|
-|Protocol|HTTP|
-|Port|`80`|
-
----
-
-# 🔐 Step 1 — Use the Multi-AZ VPC
-
-For this lab, use the existing Multi-AZ VPC and its public subnets.
-
-### VPC
+Verify:
 
 ```text
-MetaPi-MultiAZ-VPC
 CIDR: 10.20.0.0/16
+State: Available
 ```
-
-### Public Subnets
-
-```text
-MetaPi-Public-A
-eu-north-1a
-10.20.1.0/24
-```
-
-```text
-MetaPi-Public-B
-eu-north-1b
-10.20.2.0/24
-```
-
-### ⚠️ Important
-
-Make sure you are working in:
-
-```text
-eu-north-1
-```
-
-Do **not** accidentally select the default VPC.
 
 ---
 
-# 🛡️ Step 2 — Create the ALB Security Group
+### Verify Public Subnet A
 
 Go to:
 
+**VPC → Subnets**
+
+Find:
+
 ```text
-EC2
-→ Security Groups
-→ Create security group
+MetaPi-Public-A
 ```
 
-Create:
+Verify that it belongs to:
+
+```text
+MetaPi-MultiAZ-VPC
+```
+
+and is associated with one Availability Zone.
+
+---
+
+### Verify Public Subnet B
+
+Find:
+
+```text
+MetaPi-Public-B
+```
+
+Verify that it belongs to:
+
+```text
+MetaPi-MultiAZ-VPC
+```
+
+and is located in a **different Availability Zone** from Public-A.
+
+### Expected result
+
+```text
+MetaPi-Public-A → AZ-A
+MetaPi-Public-B → AZ-B
+```
+
+---
+
+# 🔐 Step 2 — Create the ALB Security Group
+
+Navigate to:
+
+**AWS Console → EC2 → Security Groups**
+
+Click:
+
+**Create security group**
+
+### Security Group Configuration
+
+**Security group name:**
 
 ```text
 MetaPi-Lab15-ALB-SG
 ```
 
-### VPC
+**Description:**
 
-Select:
+```text
+Security group for Lab 15 Application Load Balancer
+```
+
+**VPC:**
 
 ```text
 MetaPi-MultiAZ-VPC
 ```
 
-### Inbound Rules
+---
 
-|Type|Port|Source|
-|---|--:|---|
-|HTTP|80|`0.0.0.0/0`|
+## Inbound Rules
 
-This allows users on the internet to access the ALB over HTTP.
+Add:
 
-### Outbound Rules
+| Type | Protocol | Port | Source      |
+| ---- | -------- | ---: | ----------- |
+| HTTP | TCP      |   80 | `0.0.0.0/0` |
 
-Keep the default:
+This allows users on the internet to send HTTP requests to the ALB.
+
+---
+
+## Outbound Rules
+
+Keep the default rule:
 
 ```text
-All traffic → 0.0.0.0/0
+All traffic
+0.0.0.0/0
 ```
 
 Click:
 
-```text
-Create security group
-```
+**Create security group**
 
 ---
 
-# 🛡️ Step 3 — Create the Web Server Security Group
+# 🔐 Step 3 — Create the Web Server Security Group
 
-Create another Security Group:
+Create another Security Group.
+
+Navigate to:
+
+**EC2 → Security Groups → Create security group**
+
+### Configuration
+
+**Security group name:**
 
 ```text
 MetaPi-Lab15-Web-SG
 ```
 
-Use:
+**Description:**
 
 ```text
-VPC:
+Security group for Lab 15 EC2 web servers
+```
+
+**VPC:**
+
+```text
 MetaPi-MultiAZ-VPC
 ```
 
-### Inbound Rules
+---
+
+## Inbound Rule 1 — HTTP
 
 Add:
 
-|Type|Port|Source|
-|---|--:|---|
-|HTTP|80|`MetaPi-Lab15-ALB-SG`|
-|SSH|22|My IP|
+| Type | Protocol | Port | Source                |
+| ---- | -------- | ---: | --------------------- |
+| HTTP | TCP      |   80 | `MetaPi-Lab15-ALB-SG` |
 
-### Why?
+When selecting the source, choose the **Security Group** option and select:
 
-The architecture should be:
+```text
+MetaPi-Lab15-ALB-SG
+```
+
+---
+
+## Inbound Rule 2 — SSH
+
+Add:
+
+| Type | Protocol | Port | Source |
+| ---- | -------- | ---: | ------ |
+| SSH  | TCP      |   22 | My IP  |
+
+Do **not** use:
+
+```text
+0.0.0.0/0
+```
+
+for SSH in this lab.
+
+Click:
+
+**Create security group**
+
+---
+
+# 💡 Why Two Security Groups?
+
+The architecture now provides a simple security boundary:
 
 ```text
 Internet
-   │
-   ▼
-ALB Security Group
-   │
-   │ HTTP :80
-   ▼
-Web Server Security Group
-   │
-   ├── Web Server A
-   └── Web Server B
+   |
+   | HTTP :80
+   v
+ALB
+   |
+   | HTTP :80
+   v
+EC2 Web Servers
 ```
 
-This allows the ALB to communicate with the web servers without exposing HTTP directly to the entire internet.
+The EC2 instances do not need to accept HTTP traffic directly from the internet.
+
+They only accept HTTP traffic coming from:
+
+```text
+MetaPi-Lab15-ALB-SG
+```
+
+This is a more controlled security design.
 
 ---
 
 # 🖥️ Step 4 — Launch Web Server A
 
-Go to:
+Navigate to:
+
+**AWS Console → EC2 → Instances → Launch instance**
+
+### Name
 
 ```text
-EC2
-→ Instances
-→ Launch instance
+MetaPi-Lab15-Web-A
 ```
+
+### AMI
+
+Choose:
+
+```text
+Ubuntu Server
+```
+
+Use the Ubuntu version available in your selected AWS Region.
+
+### Instance Type
+
+For this training lab, use a small instance type suitable for your AWS account/free-tier eligibility.
+
+For example:
+
+```text
+t3.micro
+```
+
+> Always verify the current AWS pricing/free-tier eligibility for your account before launching resources.
+
+---
+
+## Key Pair
+
+Select your existing EC2 key pair.
+
+Example:
+
+```text
+Your-Key-Pair
+```
+
+---
+
+## Network Settings
+
+Click:
+
+**Edit**
 
 Configure:
 
-|Setting|Value|
-|---|---|
-|Name|`MetaPi-Lab15-Web-A`|
-|OS|Ubuntu|
-|VPC|`MetaPi-MultiAZ-VPC`|
-|Subnet|`MetaPi-Public-A`|
-|Availability Zone|`eu-north-1a`|
-|Auto-assign Public IP|Enabled|
-|Security Group|`MetaPi-Lab15-Web-SG`|
+**VPC:**
 
-### User Data
+```text
+MetaPi-MultiAZ-VPC
+```
 
-Under **Advanced details → User data**, add:
+**Subnet:**
+
+```text
+MetaPi-Public-A
+```
+
+**Auto-assign Public IP:**
+
+```text
+Enable
+```
+
+**Security Group:**
+
+```text
+MetaPi-Lab15-Web-SG
+```
+
+---
+
+# ⚙️ Step 5 — Configure User Data for Web Server A
+
+Scroll to:
+
+**Advanced details → User data**
+
+Paste:
 
 ```bash
 #!/bin/bash
@@ -255,79 +474,179 @@ Under **Advanced details → User data**, add:
 apt-get update -y
 apt-get install -y apache2
 
-echo "<h1>MetaPi Lab 15 - Web Server A</h1><p>Availability Zone: eu-north-1a</p>" > /var/www/html/index.html
+echo "<h1>MetaPi Web Server A</h1><p>Availability Zone A</p>" > /var/www/html/index.html
 
 systemctl enable --now apache2
 ```
 
-Launch the instance.
+Then click:
 
-### ✅ Expected Result
+**Launch instance**
+
+---
+
+# ⏳ Step 6 — Wait for Web Server A
+
+Wait until the instance shows:
+
+```text
+Instance state: Running
+```
+
+and:
+
+```text
+Status checks: 2/2 checks passed
+```
+
+The User Data script should install Apache automatically.
+
+---
+
+# 🖥️ Step 7 — Launch Web Server B
+
+Repeat the EC2 launch process.
+
+### Name
+
+```text
+MetaPi-Lab15-Web-B
+```
+
+### VPC
+
+```text
+MetaPi-MultiAZ-VPC
+```
+
+### Subnet
+
+```text
+MetaPi-Public-B
+```
+
+### Public IP
+
+```text
+Enabled
+```
+
+### Security Group
+
+```text
+MetaPi-Lab15-Web-SG
+```
+
+---
+
+## User Data for Web Server B
+
+Use:
+
+```bash
+#!/bin/bash
+
+apt-get update -y
+apt-get install -y apache2
+
+echo "<h1>MetaPi Web Server B</h1><p>Availability Zone B</p>" > /var/www/html/index.html
+
+systemctl enable --now apache2
+```
+
+Click:
+
+**Launch instance**
+
+---
+
+# 🔎 Step 8 — Verify Both Web Servers
+
+Wait for both instances to become:
+
+```text
+Running
+```
+
+and:
+
+```text
+2/2 status checks passed
+```
 
 You should have:
 
 ```text
 MetaPi-Lab15-Web-A
-eu-north-1a
+        ↓
 MetaPi-Public-A
+        ↓
+AZ-A
 ```
 
----
-
-# 🖥️ Step 5 — Launch Web Server B
-
-Launch another EC2 instance.
-
-Configure:
-
-|Setting|Value|
-|---|---|
-|Name|`MetaPi-Lab15-Web-B`|
-|OS|Ubuntu|
-|VPC|`MetaPi-MultiAZ-VPC`|
-|Subnet|`MetaPi-Public-B`|
-|Availability Zone|`eu-north-1b`|
-|Auto-assign Public IP|Enabled|
-|Security Group|`MetaPi-Lab15-Web-SG`|
-
-### User Data
-
-```bash
-#!/bin/bash
-
-apt-get update -y
-apt-get install -y apache2
-
-echo "<h1>MetaPi Lab 15 - Web Server B</h1><p>Availability Zone: eu-north-1b</p>" > /var/www/html/index.html
-
-systemctl enable --now apache2
-```
-
-Launch the instance.
-
-### ✅ Expected Result
-
-You should have:
+and:
 
 ```text
 MetaPi-Lab15-Web-B
-eu-north-1b
+        ↓
 MetaPi-Public-B
+        ↓
+AZ-B
 ```
 
 ---
 
-# 🎯 Step 6 — Create the Target Group
+# 🌐 Step 9 — Test Apache Directly
 
-Go to:
+For each instance:
+
+**EC2 → Instances → Select instance**
+
+Copy the:
 
 ```text
-EC2
-→ Target Groups
-→ Create target group
+Public IPv4 address
 ```
 
-### Target Type
+Open:
+
+```text
+http://<PUBLIC-IP>
+```
+
+### Web Server A should display:
+
+```text
+MetaPi Web Server A
+Availability Zone A
+```
+
+### Web Server B should display:
+
+```text
+MetaPi Web Server B
+Availability Zone B
+```
+
+If these pages do not load, **fix the EC2 web servers before continuing**.
+
+---
+
+# 🎯 Step 10 — Create the Target Group
+
+Navigate to:
+
+**EC2 → Target Groups**
+
+Click:
+
+**Create target group**
+
+---
+
+## Target Group Configuration
+
+### Target type
 
 Select:
 
@@ -335,132 +654,129 @@ Select:
 Instances
 ```
 
-### Basic Configuration
+### Target group name
 
 ```text
-Target group name:
 MetaPi-Lab15-TG
+```
 
-Protocol:
+### Protocol
+
+```text
 HTTP
+```
 
-Port:
+### Port
+
+```text
 80
+```
 
-VPC:
+### VPC
+
+```text
 MetaPi-MultiAZ-VPC
 ```
 
 ---
 
-## 🩺 Health Check
+# ❤️ Step 11 — Configure Health Checks
 
 Configure:
 
-```text
-Health check protocol:
-HTTP
+**Health check protocol:**
 
-Health check path:
+```text
+HTTP
+```
+
+**Health check path:**
+
+```text
 /
 ```
 
-Keep the remaining settings at their defaults unless your lab requires otherwise.
+The ALB will periodically request:
+
+```text
+http://<target>/ 
+```
+
+and determine whether the target is healthy.
+
+Keep the default healthy/unhealthy thresholds unless your training instructions require different values.
+
+Click:
+
+**Next**
 
 ---
 
-## 🖥️ Register Targets
+# 🖥️ Step 12 — Register EC2 Targets
 
-Select:
+On the **Register targets** page, select:
 
 ```text
 MetaPi-Lab15-Web-A
 MetaPi-Lab15-Web-B
 ```
 
-Make sure both use:
+Make sure the port is:
 
 ```text
-Port: 80
+80
 ```
 
 Click:
 
-```text
-Include as pending below
-```
+**Include as pending below**
 
-Then:
-
-```text
-Create target group
-```
+Then create the target group.
 
 ---
 
-# 🔎 Step 7 — Verify the Target Group
+# 🔎 Step 13 — Verify Target Group
 
 Open:
 
-```text
-EC2
-→ Target Groups
-→ MetaPi-Lab15-TG
-→ Targets
-```
+**EC2 → Target Groups → MetaPi-Lab15-TG**
 
-Initially, targets may show:
+Go to:
+
+**Targets**
+
+Initially, the targets may show:
 
 ```text
 Initial
 ```
 
-Wait for the health checks to complete.
+Wait a few moments while AWS performs health checks.
 
-### Expected Result
-
-```text
-MetaPi-Lab15-Web-A → 🟢 Healthy
-MetaPi-Lab15-Web-B → 🟢 Healthy
-```
-
-You want:
+Eventually, both should become:
 
 ```text
-2 Healthy
-0 Unhealthy
+🟢 Healthy
 ```
 
-### ⚠️ If a Target Is Unhealthy
+Expected:
 
-Check:
-
-- EC2 instance is running.
-    
-- Apache is running.
-    
-- Apache is listening on port `80`.
-    
-- Web Security Group allows HTTP `80` from `MetaPi-Lab15-ALB-SG`.
-    
-- Health check path is `/`.
-    
-- Target is registered on port `80`.
-    
-- Network ACL allows the required traffic.
-    
+```text
+MetaPi-Lab15-Web-A → Healthy
+MetaPi-Lab15-Web-B → Healthy
+```
 
 ---
 
-# ⚖️ Step 8 — Create the Application Load Balancer
+# ⚖️ Step 14 — Create the Application Load Balancer
 
-Go to:
+Navigate to:
 
-```text
-EC2
-→ Load Balancers
-→ Create load balancer
-```
+**EC2 → Load Balancers**
+
+Click:
+
+**Create Load Balancer**
 
 Select:
 
@@ -470,13 +786,11 @@ Application Load Balancer
 
 Click:
 
-```text
-Create
-```
+**Create**
 
 ---
 
-# ⚙️ Step 9 — Configure Basic Settings
+# ⚙️ Step 15 — Configure the ALB
 
 ### Load Balancer Name
 
@@ -486,222 +800,110 @@ MetaPi-Lab15-ALB
 
 ### Scheme
 
+Select:
+
 ```text
 Internet-facing
 ```
 
 ### IP Address Type
 
+Select:
+
 ```text
 IPv4
 ```
 
 ---
 
-# 🌐 Step 10 — Configure Network Mapping
+# 🌐 Step 16 — Configure Network Mapping
 
-### VPC
-
-Select:
+For VPC select:
 
 ```text
 MetaPi-MultiAZ-VPC
-10.20.0.0/16
 ```
 
-### Availability Zones and Subnets
-
-Select:
+Select the two Availability Zones/subnets:
 
 ```text
-eu-north-1a
-→ MetaPi-Public-A
-→ 10.20.1.0/24
-```
-
-and:
-
-```text
-eu-north-1b
-→ MetaPi-Public-B
-→ 10.20.2.0/24
-```
-
-### ⚠️ Important
-
-You must select **both Availability Zones**.
-
-The final mapping should be:
-
-```text
-eu-north-1a
-      ↓
 MetaPi-Public-A
-
-eu-north-1b
-      ↓
 MetaPi-Public-B
 ```
 
-This provides the Multi-AZ architecture.
+The ALB should therefore span two Availability Zones.
 
 ---
 
-# 🔐 Step 11 — Select the ALB Security Group
+# 🔐 Step 17 — Attach the ALB Security Group
 
-Under **Security Groups**, select:
+Under Security Groups, select:
 
 ```text
 MetaPi-Lab15-ALB-SG
 ```
 
-Verify that the Security Group allows:
-
-```text
-HTTP :80
-Source: 0.0.0.0/0
-```
+Make sure the ALB is **not** using the EC2 web server Security Group.
 
 ---
 
-# 🎧 Step 12 — Configure the Listener
+# 👂 Step 18 — Configure the Listener
 
-Under **Listeners and routing**, configure:
+Configure the listener:
 
 ```text
-Protocol:
-HTTP
-
-Port:
-80
+Protocol: HTTP
+Port: 80
 ```
 
-### Default Action
-
-Select:
+For the default action choose:
 
 ```text
-Forward to target groups
-```
-
-Target Group:
-
-```text
+Forward to
 MetaPi-Lab15-TG
 ```
 
-Weight:
-
-```text
-100%
-```
-
-The final listener configuration should be:
+The traffic flow is now:
 
 ```text
 HTTP :80
-      ↓
-MetaPi-Lab15-TG
-      ↓
-Web-A + Web-B
-```
-
----
-
-# 🛡️ Step 13 — Service Integrations
-
-For this basic ALB lab, do not configure additional services.
-
-Leave:
-
-```text
-CloudFront + WAF → Not configured
-AWS WAF → Not configured
-Global Accelerator → Not configured
-```
-
-These are not required for this lab.
-
----
-
-# 🔍 Step 14 — Review the Configuration
-
-Before creating the ALB, verify:
-
-```text
-Name:
+   ↓
 MetaPi-Lab15-ALB
-
-Scheme:
-Internet-facing
-
-IP:
-IPv4
-
-VPC:
-MetaPi-MultiAZ-VPC
-
-Subnets:
-MetaPi-Public-A
-MetaPi-Public-B
-
-Security Group:
-MetaPi-Lab15-ALB-SG
-
-Listener:
-HTTP :80
-
-Target Group:
+   ↓
 MetaPi-Lab15-TG
-
-Weight:
-100%
+   ↓
+EC2 Target
 ```
 
-If everything is correct, click:
+Review the configuration and click:
 
-```text
-Create load balancer
-```
+**Create load balancer**
 
 ---
 
-# ⏳ Step 15 — Wait for the ALB to Become Active
-
-Go to:
-
-```text
-EC2
-→ Load Balancers
-→ MetaPi-Lab15-ALB
-```
-
-Wait until:
-
-```text
-State:
-Active
-```
-
-The ALB may initially show:
-
-```text
-Provisioning
-```
-
-This is normal.
-
----
-
-# 🌍 Step 16 — Get the ALB DNS Name
+# ⏳ Step 19 — Wait for the ALB
 
 Open:
 
+**EC2 → Load Balancers**
+
+Select:
+
 ```text
 MetaPi-Lab15-ALB
 ```
 
-Find:
+Wait until the ALB state becomes:
+
+```text
+Active
+```
+
+---
+
+# 🌍 Step 20 — Copy the ALB DNS Name
+
+Inside the ALB details, find:
 
 ```text
 DNS name
@@ -713,79 +915,130 @@ It will look similar to:
 MetaPi-Lab15-ALB-xxxxxxxx.eu-north-1.elb.amazonaws.com
 ```
 
-⚠️ Your DNS name will be different.
+Copy the DNS name.
 
 ---
 
-# 🧪 Step 17 — Test the ALB
+# 🧪 Step 21 — Test the Application Through the ALB
 
-Open your browser and enter:
+Open your browser and visit:
 
 ```text
 http://<ALB-DNS-NAME>
 ```
 
-Example:
+You should receive a response from one of the EC2 servers.
+
+For example:
 
 ```text
-http://MetaPi-Lab15-ALB-xxxxxxxx.eu-north-1.elb.amazonaws.com
+MetaPi Web Server A
+Availability Zone A
 ```
 
-Because the listener is configured for HTTP port `80`, use:
+or:
 
 ```text
-http://
-```
-
-not:
-
-```text
-https://
+MetaPi Web Server B
+Availability Zone B
 ```
 
 ---
 
-# ✅ Step 18 — Verify Web Server A
+# 🔄 Step 22 — Test Load Balancing
 
-The ALB should be able to route traffic to Web Server A.
+Refresh the ALB URL multiple times.
 
-Expected response:
+The ALB distributes requests across the healthy targets according to its configured routing behavior.
 
-```text
-MetaPi Lab 15 - Web Server A
-
-Availability Zone:
-eu-north-1a
-```
-
-This proves:
+You may see:
 
 ```text
-Internet
+Request
    ↓
 ALB
-   ↓
-Target Group
    ↓
 Web Server A
 ```
 
----
-
-# ✅ Step 19 — Verify Web Server B
-
-Refresh the ALB DNS URL or make another request.
-
-You should also be able to receive:
+and another request may be sent to:
 
 ```text
-MetaPi Lab 15 - Web Server B
-
-Availability Zone:
-eu-north-1b
+Request
+   ↓
+ALB
+   ↓
+Web Server B
 ```
 
-This proves:
+Because both pages contain different server identifiers, the response helps you visually verify that requests can reach different backend instances.
+
+> **Important:** Do not assume every browser refresh must alternate A → B → A → B. Load balancing does not guarantee strict alternation.
+
+---
+
+# 💥 Step 23 — Simulate a Backend Failure
+
+Now we will intentionally make one backend unhealthy.
+
+Connect to:
+
+```text
+MetaPi-Lab15-Web-A
+```
+
+using SSH.
+
+Run:
+
+```bash
+sudo systemctl stop apache2
+```
+
+Verify:
+
+```bash
+sudo systemctl status apache2
+```
+
+Apache should now be stopped.
+
+---
+
+# ❤️ Step 24 — Wait for the Health Check
+
+Go to:
+
+**EC2 → Target Groups → MetaPi-Lab15-TG → Targets**
+
+Initially Web Server A may still show:
+
+```text
+Healthy
+```
+
+Wait for the ALB health check to detect the failure.
+
+Eventually:
+
+```text
+MetaPi-Lab15-Web-A → Unhealthy
+MetaPi-Lab15-Web-B → Healthy
+```
+
+---
+
+# 🧪 Step 25 — Test the ALB During Failure
+
+Open:
+
+```text
+http://<ALB-DNS-NAME>
+```
+
+Refresh the page.
+
+Traffic should continue to the healthy backend:
 
 ```text
 Internet
@@ -795,95 +1048,19 @@ ALB
 Target Group
    ↓
 Web Server B
+   ↓
+HTTP Response
 ```
 
-### ⚠️ Important
-
-Do not expect every refresh to alternate exactly:
-
-```text
-A → B → A → B
-```
-
-Browser connection reuse and ALB behavior can result in the same server responding multiple times.
-
-The important thing is that **both healthy targets can successfully serve traffic through the ALB**.
+The ALB avoids routing normal traffic to the unhealthy target.
 
 ---
 
-# 🧪 Step 20 — Simulate an Instance Failure
+# 🔧 Step 26 — Restore Web Server A
 
-This step demonstrates the benefit of health checks.
+SSH into Web Server A again.
 
-### Stop Apache on Web Server A
-
-Connect to Web Server A and run:
-
-```bash
-sudo systemctl stop apache2
-```
-
-Now return to:
-
-```text
-EC2
-→ Target Groups
-→ MetaPi-Lab15-TG
-→ Targets
-```
-
-Wait for Web Server A to become:
-
-```text
-🔴 Unhealthy
-```
-
-while Web Server B remains:
-
-```text
-🟢 Healthy
-```
-
----
-
-# 🔄 Step 21 — Test Failover
-
-Open the ALB DNS name again:
-
-```text
-http://<ALB-DNS-NAME>
-```
-
-Traffic should continue to the healthy Web Server B.
-
-Architecture:
-
-```text
-                 Internet
-                    │
-                    ▼
-             Application ALB
-                    │
-                    ▼
-             MetaPi-Lab15-TG
-                /        \
-               /          \
-              ▼            ▼
-           Web-A         Web-B
-           🔴             🟢
-        Unhealthy        Healthy
-                            ▲
-                            │
-                         Traffic
-```
-
-This demonstrates that the ALB uses target health to determine where traffic should be sent.
-
----
-
-# 🔄 Step 22 — Restore Web Server A
-
-Start Apache again:
+Run:
 
 ```bash
 sudo systemctl start apache2
@@ -895,307 +1072,386 @@ Verify:
 sudo systemctl status apache2
 ```
 
-Wait for the ALB health check to run again.
-
-Eventually:
+Apache should show:
 
 ```text
-Web Server A → 🟢 Healthy
-Web Server B → 🟢 Healthy
-```
-
-Expected:
-
-```text
-2 Healthy
-0 Unhealthy
+active (running)
 ```
 
 ---
 
-# 🔎 Step 23 — Final Verification
+# ❤️ Step 27 — Verify Target Recovery
 
-Verify all of the following:
+Return to:
 
-### Network
+**EC2 → Target Groups → MetaPi-Lab15-TG → Targets**
+
+Wait for Web Server A to become:
 
 ```text
-☑ MetaPi-MultiAZ-VPC
-☑ MetaPi-Public-A
-☑ MetaPi-Public-B
-☑ eu-north-1a
-☑ eu-north-1b
+🟢 Healthy
 ```
+
+Expected final state:
+
+```text
+MetaPi-Lab15-Web-A → Healthy
+MetaPi-Lab15-Web-B → Healthy
+```
+
+---
+
+# 🧠 What Happened During the Failure Test?
+
+Before failure:
+
+```text
+                    ALB
+                   /   \
+                  /     \
+             Healthy   Healthy
+                |         |
+             Server A   Server B
+```
+
+After stopping Apache on Server A:
+
+```text
+                    ALB
+                   /   \
+                  /     \
+            Unhealthy   Healthy
+                X          |
+                         Server B
+```
+
+The ALB health check detects that Server A is not responding correctly.
+
+Traffic can therefore continue through the healthy target.
+
+---
+
+# 🔍 Troubleshooting
+
+## ❌ Target is Unhealthy
+
+Check the following:
+
+### 1. Apache is running
+
+```bash
+sudo systemctl status apache2
+```
+
+If stopped:
+
+```bash
+sudo systemctl start apache2
+```
+
+---
+
+### 2. Apache is listening on port 80
+
+Run:
+
+```bash
+sudo ss -tlnp | grep :80
+```
+
+You should see Apache listening on port 80.
+
+---
+
+### 3. Web Server Security Group
+
+Verify:
+
+```text
+HTTP :80
+Source: MetaPi-Lab15-ALB-SG
+```
+
+---
+
+### 4. Target Group Port
+
+Verify:
+
+```text
+HTTP :80
+```
+
+---
+
+### 5. Health Check Path
+
+Verify:
+
+```text
+/
+```
+
+---
+
+### 6. Apache index page exists
+
+Run:
+
+```bash
+ls -l /var/www/html/
+```
+
+You should see:
+
+```text
+index.html
+```
+
+---
+
+## ❌ ALB DNS Name Does Not Open
+
+Check:
+
+* ALB state is `Active`.
+* ALB is internet-facing.
+* ALB is attached to both public subnets.
+* ALB Security Group allows HTTP `80`.
+* Public subnets have a route to the Internet Gateway.
+* At least one target is healthy.
+
+---
+
+## ❌ Direct EC2 Website Does Not Open
+
+Check:
+
+* EC2 instance is running.
+* Public IPv4 address exists.
+* Apache is installed.
+* Apache is running.
+* Security Group allows HTTP `80`.
+* The instance is in the correct public subnet.
+* The subnet has internet routing.
+
+---
+
+# 📊 Final Verification Checklist
+
+Before marking the lab complete, verify every item.
+
+### VPC
+
+* [ ] `MetaPi-MultiAZ-VPC` exists.
+* [ ] Public-A exists.
+* [ ] Public-B exists.
+* [ ] Public-A and Public-B are in different Availability Zones.
 
 ### Security
 
-```text
-☑ MetaPi-Lab15-ALB-SG
-☑ MetaPi-Lab15-Web-SG
-☑ ALB allows HTTP :80 from internet
-☑ Web servers allow HTTP :80 from ALB SG
-☑ SSH :22 allowed from My IP
-```
+* [ ] `MetaPi-Lab15-ALB-SG` exists.
+* [ ] ALB Security Group allows HTTP `80` from `0.0.0.0/0`.
+* [ ] `MetaPi-Lab15-Web-SG` exists.
+* [ ] Web Security Group allows HTTP `80` from the ALB Security Group.
+* [ ] SSH `22` is restricted to My IP.
 
-### Load Balancer
+### EC2
 
-```text
-☑ MetaPi-Lab15-ALB
-☑ Internet-facing
-☑ IPv4
-☑ HTTP :80
-☑ Two Availability Zones
-```
+* [ ] `MetaPi-Lab15-Web-A` is running.
+* [ ] `MetaPi-Lab15-Web-B` is running.
+* [ ] Servers are deployed in different Availability Zones.
+* [ ] Apache is running.
+* [ ] Both web pages work.
 
 ### Target Group
 
-```text
-☑ MetaPi-Lab15-TG
-☑ Web-A registered
-☑ Web-B registered
-☑ Health check path = /
-☑ Web-A = Healthy
-☑ Web-B = Healthy
-```
+* [ ] `MetaPi-Lab15-TG` exists.
+* [ ] Protocol is HTTP.
+* [ ] Port is 80.
+* [ ] Health check path is `/`.
+* [ ] Web Server A is registered.
+* [ ] Web Server B is registered.
+* [ ] Both targets become healthy.
 
-### Testing
+### ALB
 
-```text
-☑ ALB DNS works
-☑ Web-A response verified
-☑ Web-B response verified
-☑ Failover tested
-```
+* [ ] `MetaPi-Lab15-ALB` exists.
+* [ ] Scheme is Internet-facing.
+* [ ] IPv4 is configured.
+* [ ] ALB spans two Availability Zones.
+* [ ] HTTP listener exists on port 80.
+* [ ] Listener forwards traffic to `MetaPi-Lab15-TG`.
+* [ ] ALB DNS name works.
 
----
+### High Availability Test
 
-# 📸 Step 24 — Recommended Evidence Screenshots
-
-For your lab documentation, capture these screenshots:
-
-### 1. ALB Configuration
-
-Show:
-
-```text
-MetaPi-Lab15-ALB
-Internet-facing
-IPv4
-```
-
-### 2. Network Mapping
-
-Show:
-
-```text
-eu-north-1a → MetaPi-Public-A
-eu-north-1b → MetaPi-Public-B
-```
-
-### 3. Target Group Health
-
-Show:
-
-```text
-MetaPi-Lab15-TG
-
-Web-A → 🟢 Healthy
-Web-B → 🟢 Healthy
-```
-
-### 4. Web Server A
-
-Show the browser response:
-
-```text
-MetaPi Lab 15 - Web Server A
-eu-north-1a
-```
-
-### 5. Web Server B
-
-Show the browser response:
-
-```text
-MetaPi Lab 15 - Web Server B
-eu-north-1b
-```
-
-### 6. Failover Test
-
-Show:
-
-```text
-Web-A → Unhealthy
-Web-B → Healthy
-```
-
-and the application still accessible through the ALB.
+* [ ] Web Server A was intentionally stopped.
+* [ ] Web Server A became unhealthy.
+* [ ] ALB continued serving traffic through Web Server B.
+* [ ] Web Server A was started again.
+* [ ] Web Server A returned to healthy state.
 
 ---
 
-# 🧠 What Did We Build?
+# 🧠 Key Concepts Learned
 
-Before this lab, users would need to access individual EC2 servers directly:
-
-```text
-User
- ├──→ Web Server A
- └──→ Web Server B
-```
-
-After this lab:
-
-```text
-                    User
-                     │
-                     ▼
-              Application ALB
-                     │
-                     ▼
-               Target Group
-                 /       \
-                ▼         ▼
-             Web-A      Web-B
-             AZ-1a      AZ-1b
-```
-
-The ALB now provides a **single entry point** and distributes traffic across healthy EC2 instances.
-
----
-
-# 🎓 Key Concepts
+After completing this lab, you should understand:
 
 ### Application Load Balancer
 
-An ALB distributes HTTP/HTTPS application traffic across registered targets.
+An ALB distributes application-level HTTP/HTTPS traffic across registered targets.
 
 ### Target Group
 
-A Target Group contains the backend targets that receive traffic from the ALB.
+A target group contains the backend resources that receive traffic from the ALB.
 
-### Health Check
+### Health Checks
 
-Health checks allow the ALB to determine whether a target is healthy.
+Health checks allow the ALB to determine whether backend targets are available to receive traffic.
 
-### Multi-AZ
+### Security Group Referencing
 
-Deploying the web servers across two Availability Zones improves availability and resilience.
+An EC2 Security Group can allow traffic from another Security Group.
 
-### Security Groups
+This is useful for creating controlled communication between AWS resources.
 
-Separate Security Groups allow us to control:
+### Multi-AZ Architecture
 
-```text
-Internet → ALB
-ALB → EC2
-```
+Deploying backend servers across multiple Availability Zones improves availability and reduces dependence on a single Availability Zone.
 
-independently.
+### Fault Tolerance
 
----
-
-# 🏆 Lab Completion Criteria
-
-Lab 15 is successfully completed when:
-
-```text
-✅ ALB is Active
-
-✅ ALB uses MetaPi-MultiAZ-VPC
-
-✅ ALB spans two Availability Zones
-
-✅ HTTP listener is configured on port 80
-
-✅ MetaPi-Lab15-TG is attached
-
-✅ Web-A is Healthy
-
-✅ Web-B is Healthy
-
-✅ ALB DNS successfully opens
-
-✅ Web-A response verified
-
-✅ Web-B response verified
-
-✅ Failover behavior tested
-```
+When one target becomes unhealthy, the ALB can continue routing traffic to healthy targets.
 
 ---
 
-# 🧹 Step 25 — Cleanup
+# 💰 Cost Awareness
 
-If you are continuing with the next labs and these resources are required, **keep them running**.
+This lab creates AWS resources that may incur charges depending on your account, region, free-tier eligibility, and current AWS pricing.
 
-If the lab resources are no longer required, clean them up to avoid unnecessary AWS charges.
+Potential billable resources include:
 
-Review and remove:
+* Application Load Balancer.
+* EC2 instances.
+* EBS storage.
+* Public IPv4 addresses.
+* Other networking resources already created in previous labs.
+
+> **Important:** Always review the current AWS pricing and your account's free-tier eligibility before starting the lab.
+
+For a training environment, clean up resources when they are no longer required.
+
+---
+
+# 🧹 Cleanup
+
+If you are continuing to the next lab and the resources are required, keep them.
+
+Otherwise, clean up the resources created specifically for Lab 015.
+
+Recommended cleanup order:
+
+### 1. Delete the Application Load Balancer
+
+Navigate to:
+
+**EC2 → Load Balancers**
+
+Select:
 
 ```text
 MetaPi-Lab15-ALB
+```
+
+Delete it.
+
+---
+
+### 2. Delete the Target Group
+
+Navigate to:
+
+**EC2 → Target Groups**
+
+Select:
+
+```text
 MetaPi-Lab15-TG
+```
+
+Delete it.
+
+---
+
+### 3. Terminate EC2 Instances
+
+Terminate:
+
+```text
 MetaPi-Lab15-Web-A
 MetaPi-Lab15-Web-B
+```
+
+---
+
+### 4. Delete Security Groups
+
+After the dependent resources have been removed, delete:
+
+```text
 MetaPi-Lab15-ALB-SG
 MetaPi-Lab15-Web-SG
 ```
 
-### ⚠️ Important
-
-Do **not** delete shared infrastructure if future labs depend on it:
-
-```text
-MetaPi-MultiAZ-VPC
-MetaPi-Public-A
-MetaPi-Public-B
-Route Tables
-Internet Gateway
-NAT Gateway
-```
-
-Always check the next lab before deleting shared resources.
+> **Warning:** Do not delete Security Groups or VPC resources that are being used by another lab.
 
 ---
 
-# 🎉 Lab 15 Completed
+# 🏁 Lab Completed
 
-You have successfully deployed an **Internet-facing Application Load Balancer** across two Availability Zones and connected it to two EC2 web servers through a Target Group.
+🎉 **Congratulations!**
 
-### Final Architecture
+You have successfully built a highly available application delivery setup using an **AWS Application Load Balancer**.
+
+You created:
 
 ```text
-                         🌐 Internet
-                              │
-                              │ HTTP :80
-                              ▼
-                   ┌──────────────────────┐
-                   │ MetaPi-Lab15-ALB     │
-                   │ Application LB       │
-                   └──────────┬───────────┘
-                              │
-                              ▼
-                   ┌──────────────────────┐
-                   │ MetaPi-Lab15-TG      │
-                   │ Health Checks: /     │
-                   └──────────┬───────────┘
-                              │
-                   ┌──────────┴──────────┐
-                   │                     │
-                   ▼                     ▼
-          ┌─────────────────┐   ┌─────────────────┐
-          │ Web Server A    │   │ Web Server B    │
-          │ eu-north-1a     │   │ eu-north-1b     │
-          │ Public-A        │   │ Public-B        │
-          │ 🟢 Healthy      │   │ 🟢 Healthy      │
-          └─────────────────┘   └─────────────────┘
+                 🌐 Internet
+                      |
+                      v
+               Application ALB
+                      |
+                      v
+                Target Group
+                 /         \
+                /           \
+               v             v
+          EC2 Server A   EC2 Server B
+             AZ-A           AZ-B
 ```
 
-> **🏆 Result:** Multi-AZ Application Load Balancer successfully deployed, health checks verified, traffic routing tested, and failover behavior demonstrated.
+You also verified:
+
+* Multi-AZ deployment
+* Security Group based communication
+* Target registration
+* Health checks
+* ALB traffic distribution
+* Backend failure handling
+* Automatic removal of unhealthy targets
+* Recovery of a healthy target
 
 ---
 
-## ➡️ Next Lab
+## 🚀 Next Lab
 
-**Lab 16 — Create an EC2 Auto Scaling Group**
+**Lab 016 — Create an EC2 Auto Scaling Group**
+
+In the next lab, you will extend this architecture by introducing **EC2 Auto Scaling**, allowing the environment to automatically launch and terminate EC2 instances based on defined scaling requirements.
+
+---
+
+> **AWS Hands-On Labs Roadmap**
+>
+> **Learn AWS by building it, testing it, breaking it, troubleshooting it, and understanding why it works.**
