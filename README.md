@@ -664,7 +664,7 @@ This roadmap is suitable for:
 
 ```text
 Labs Completed: 14
-Labs Planned:   30
+Labs Planned:   100+
 Current Stage:  Multi-AZ Networking
 ```
 
